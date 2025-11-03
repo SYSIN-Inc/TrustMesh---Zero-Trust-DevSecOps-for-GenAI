@@ -1,0 +1,159 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-support-agent
+  namespace: secureagentops
+  labels:
+    app: customer-support-agent
+    version: "1.0.0"
+    managed-by: secureagentops
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: customer-support-agent
+  template:
+    metadata:
+      labels:
+        app: customer-support-agent
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+      containers:
+      - name: customer-support-agent
+        image: secureagentops/customer-support-agent:latest
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 8000
+          name: metrics
+        env:
+        - name: AGENT_ID
+          value: "customer-support-agent"
+        - name: AGENT_VERSION
+          value: "1.0.0"
+        - name: SECURITY_MODE
+          value: "enabled"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-secrets
+              key: api-key
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: var-tmp
+          mountPath: /var/tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: var-tmp
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-support-agent-service
+  namespace: secureagentops
+  labels:
+    app: customer-support-agent
+    managed-by: secureagentops
+spec:
+  selector:
+    app: customer-support-agent
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  - name: metrics
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: customer-support-agent-network-policy
+  namespace: secureagentops
+spec:
+  podSelector:
+    matchLabels:
+      app: customer-support-agent
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: secureagentops
+    - podSelector:
+        matchLabels:
+          app: security-gatekeeper
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-secrets
+  namespace: secureagentops
+type: Opaque
+data:
+  # Base64 encoded API key - in production, use proper secret management
+  api-key: b3BlbmFpLWFwaS1rZXktaGVyZQ==

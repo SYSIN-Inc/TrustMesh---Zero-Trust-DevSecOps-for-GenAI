@@ -1,0 +1,44 @@
+# Customer Support Agent Configuration
+
+agent:
+  id: "customer-support-agent"
+  name: "Customer Support Agent"
+  version: "1.0.0"
+  description: "Secure GenAI customer support agent"
+  
+security:
+  enabled: true
+  policies:
+    - "no-sensitive-data-collection"
+    - "rate-limiting"
+    - "input-validation"
+    - "output-sanitization"
+  
+resources:
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+  requests:
+    memory: "256Mi"
+    cpu: "200m"
+
+network:
+  policy: true
+  allowed_ports:
+    - 8080  # API
+    - 8000  # Metrics
+
+privacy:
+  compliant: true
+  data_retention: "30d"
+  gdpr_compliant: true
+
+monitoring:
+  enabled: true
+  metrics_port: 8000
+  health_check_interval: "30s"
+
+environment:
+  OPENAI_API_KEY: "${OPENAI_API_KEY}"
+  LOG_LEVEL: "INFO"
+  SECURITY_MODE: "enabled"

@@ -1,0 +1,250 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: secureagentops
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    rule_files:
+      - "/etc/prometheus/rules/*.yml"
+
+    scrape_configs:
+      - job_name: 'secureagentops-telemetry'
+        static_configs:
+          - targets: ['telemetry-collector:8000']
+        scrape_interval: 5s
+        metrics_path: /metrics
+
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: secureagentops
+data:
+  security-rules.yml: |
+    groups:
+      - name: secureagentops.rules
+        rules:
+          - alert: HighSecurityFindings
+            expr: sum(rate(secureagentops_security_findings_total{severity="HIGH"}[5m])) > 0.1
+            for: 1m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High severity security findings detected"
+              description: "Agent {{ $labels.agent_id }} has high severity security findings"
+
+          - alert: CriticalSecurityFindings
+            expr: sum(rate(secureagentops_security_findings_total{severity="CRITICAL"}[5m])) > 0
+            for: 0m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Critical security findings detected"
+              description: "Agent {{ $labels.agent_id }} has critical security findings"
+
+          - alert: AgentHealthLow
+            expr: secureagentops_agent_runtime_health < 0.7
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Agent health score is low"
+              description: "Agent {{ $labels.agent_id }} health score is {{ $value }}"
+
+          - alert: PolicyViolations
+            expr: sum(rate(secureagentops_policy_violations_total[5m])) > 0.05
+            for: 1m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Policy violations detected"
+              description: "Agent {{ $labels.agent_id }} has policy violations"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: secureagentops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+      - name: prometheus
+        image: prom/prometheus:latest
+        ports:
+        - containerPort: 9090
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+        - name: rules
+          mountPath: /etc/prometheus/rules
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus/'
+          - '--web.console.libraries=/etc/prometheus/console_libraries'
+          - '--web.console.templates=/etc/prometheus/consoles'
+          - '--web.enable-lifecycle'
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus-config
+      - name: rules
+        configMap:
+          name: prometheus-rules
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: secureagentops
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - port: 9090
+    targetPort: 9090
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: secureagentops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: "admin"
+        volumeMounts:
+        - name: grafana-storage
+          mountPath: /var/lib/grafana
+        - name: grafana-config
+          mountPath: /etc/grafana/provisioning/dashboards
+      volumes:
+      - name: grafana-storage
+        emptyDir: {}
+      - name: grafana-config
+        configMap:
+          name: grafana-dashboard-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: secureagentops
+spec:
+  selector:
+    app: grafana
+  ports:
+  - port: 3000
+    targetPort: 3000
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-config
+  namespace: secureagentops
+data:
+  dashboards.yml: |
+    apiVersion: 1
+    providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 10
+        allowUiUpdates: true
+        options:
+          path: /var/lib/grafana/dashboards
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-collector
+  namespace: secureagentops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-collector
+  template:
+    metadata:
+      labels:
+        app: telemetry-collector
+    spec:
+      containers:
+      - name: telemetry-collector
+        image: secureagentops/telemetry-collector:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: PROMETHEUS_PORT
+          value: "8000"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-collector
+  namespace: secureagentops
+spec:
+  selector:
+    app: telemetry-collector
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+

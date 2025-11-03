@@ -1,0 +1,25 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: secure-agent-ops
+  region: us-east-1
+  version: "1.29"
+
+managedNodeGroups:
+  - name: ng-general
+    instanceType: t3.large
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 5
+    volumeSize: 50
+    ssh:
+      allow: false
+
+iam:
+  withOIDC: true
+
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy

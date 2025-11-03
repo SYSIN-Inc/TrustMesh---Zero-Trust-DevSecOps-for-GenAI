@@ -1,0 +1,302 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secureagentops
+  labels:
+    name: secureagentops
+    security-policy: zero-trust
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: secureagentops-sa
+  namespace: secureagentops
+  annotations:
+    iam.gke.io/gcp-service-account: secureagentops@project.iam.gserviceaccount.com
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: secureagentops-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["security.istio.io"]
+  resources: ["authorizationpolicies"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: secureagentops-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: secureagentops-role
+subjects:
+- kind: ServiceAccount
+  name: secureagentops-sa
+  namespace: secureagentops
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gatekeeper-config
+  namespace: secureagentops
+data:
+  policies.yaml: |
+    policies:
+      - id: "zt-001"
+        name: "No Critical Security Issues"
+        description: "Block deployment if critical security issues are found"
+        severity: "critical"
+        action: "block"
+        conditions:
+          max_critical_findings: 0
+        remediation: "Fix all critical security issues before deployment"
+      
+      - id: "zt-002"
+        name: "Limited High Security Issues"
+        description: "Allow maximum 2 high-severity security issues"
+        severity: "high"
+        action: "warn"
+        conditions:
+          max_high_findings: 2
+        remediation: "Review and fix high-severity issues"
+      
+      - id: "zt-003"
+        name: "Agent Identity Verification"
+        description: "Agent must have valid signed manifest"
+        severity: "critical"
+        action: "block"
+        conditions:
+          require_signed_manifest: true
+        remediation: "Ensure agent has valid signed manifest"
+
+  security-config.yaml: |
+    security:
+      enable_prompt_scanning: true
+      enable_code_scanning: true
+      enable_dependency_scanning: true
+      max_scan_timeout: 300
+      allowed_severities:
+        - "LOW"
+        - "MEDIUM"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: security-gatekeeper
+  namespace: secureagentops
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: security-gatekeeper
+  template:
+    metadata:
+      labels:
+        app: security-gatekeeper
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: secureagentops-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+      containers:
+      - name: security-gatekeeper
+        image: secureagentops/gatekeeper:latest
+        ports:
+        - containerPort: 8000
+          name: metrics
+        - containerPort: 8080
+          name: api
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: PROMETHEUS_PORT
+          value: "8000"
+        - name: API_PORT
+          value: "8080"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/gatekeeper
+        - name: keys
+          mountPath: /etc/keys
+          readOnly: true
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: gatekeeper-config
+      - name: keys
+        secret:
+          secretName: gatekeeper-keys
+          defaultMode: 0400
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: security-gatekeeper
+  namespace: secureagentops
+spec:
+  selector:
+    app: security-gatekeeper
+  ports:
+  - name: api
+    port: 8080
+    targetPort: 8080
+  - name: metrics
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gatekeeper-network-policy
+  namespace: secureagentops
+spec:
+  podSelector:
+    matchLabels:
+      app: security-gatekeeper
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: secureagentops
+    - podSelector:
+        matchLabels:
+          app: ci-cd-pipeline
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: secureagentops
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8000
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-deployer
+  namespace: secureagentops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-deployer
+  template:
+    metadata:
+      labels:
+        app: agent-deployer
+    spec:
+      serviceAccountName: secureagentops-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+      containers:
+      - name: agent-deployer
+        image: secureagentops/agent-deployer:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: GATEKEEPER_URL
+          value: "http://security-gatekeeper:8080"
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-deployer
+  namespace: secureagentops
+spec:
+  selector:
+    app: agent-deployer
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP
